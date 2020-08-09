@@ -22,12 +22,12 @@ var (
 )
 
 // Factory is a function type creating a grpc client
-type Factory func() (*grpc.ClientConn, error)
+type Factory func(idx int32) (*grpc.ClientConn, int32, error)
 
 // FactoryWithContext is a function type creating a grpc client
 // that accepts the context parameter that could be passed from
 // Get or NewWithContext method.
-type FactoryWithContext func(context.Context) (*grpc.ClientConn, error)
+type FactoryWithContext func(context.Context, int32) (*grpc.ClientConn, int32, error)
 
 // Pool is the grpc client pool
 type Pool struct {
@@ -45,6 +45,7 @@ type ClientConn struct {
 	timeUsed      time.Time
 	timeInitiated time.Time
 	unhealthy     bool
+	idx           int32
 }
 
 // New creates a new clients pool with the given initial and maximum capacity,
@@ -52,7 +53,9 @@ type ClientConn struct {
 // clients could not be created
 func New(factory Factory, init, capacity int, idleTimeout time.Duration,
 	maxLifeDuration ...time.Duration) (*Pool, error) {
-	return NewWithContext(context.Background(), func(ctx context.Context) (*grpc.ClientConn, error) { return factory() },
+	return NewWithContext(context.Background(), func(ctx context.Context, idx int32) (*grpc.ClientConn, int32, error) {
+		return factory(idx)
+	},
 		init, capacity, idleTimeout, maxLifeDuration...)
 }
 
@@ -81,7 +84,7 @@ func NewWithContext(ctx context.Context, factory FactoryWithContext, init, capac
 		p.maxLifeDuration = maxLifeDuration[0]
 	}
 	for i := 0; i < init; i++ {
-		c, err := factory(ctx)
+		c, idx, err := factory(ctx, -1)
 		if err != nil {
 			return nil, err
 		}
@@ -91,12 +94,14 @@ func NewWithContext(ctx context.Context, factory FactoryWithContext, init, capac
 			pool:          p,
 			timeUsed:      time.Now(),
 			timeInitiated: time.Now(),
+			idx:           idx,
 		}
 	}
 	// Fill the rest of the pool with empty clients
 	for i := 0; i < capacity-init; i++ {
 		p.clients <- ClientConn{
 			pool: p,
+			idx:  -1,
 		}
 	}
 	return p, nil
@@ -169,12 +174,13 @@ func (p *Pool) Get(ctx context.Context) (*ClientConn, error) {
 
 	var err error
 	if wrapper.ClientConn == nil {
-		wrapper.ClientConn, err = p.factory(ctx)
+		wrapper.ClientConn, wrapper.idx, err = p.factory(ctx, wrapper.idx)
 		if err != nil {
 			// If there was an error, we want to put back a placeholder
 			// client in the channel
 			clients <- ClientConn{
 				pool: p,
+				idx:  wrapper.idx,
 			}
 		}
 		// This is a new connection, reset its initiated time
@@ -219,6 +225,7 @@ func (c *ClientConn) Close() error {
 		pool:       c.pool,
 		ClientConn: c.ClientConn,
 		timeUsed:   time.Now(),
+		idx:        c.idx,
 	}
 	if c.unhealthy {
 		wrapper.ClientConn.Close()
